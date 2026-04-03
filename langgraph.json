@@ -1,11 +1,9 @@
 {
   "dockerfile_lines": [],
   "graphs": {
-    "investment_research": "app/core/engine.py:graph"
+    "investment_research": "lg/app/core/engine.py:graph"
   },
   "env": ".env",
   "python_version": "3.13",
-  "dependencies": [
-    "."
-  ]
+  "dependencies": ["."]
 }

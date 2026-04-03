@@ -1,0 +1,18 @@
+langgraph
+langgraph-checkpoint-postgres  # For production state management
+langgraph-prebuilt
+langgraph-sdk
+langsmith
+langchain-community
+langchain-core
+langchain-openai
+langchain-mcp-adapters
+trustcall
+langgraph-cli[inmem]
+mcp[cli]
+fastapi
+uvicorn
+psycopg[binary,pool]
+python-dotenv
+sse-starlette
+httpx

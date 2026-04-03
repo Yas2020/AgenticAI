@@ -1,5 +1,7 @@
 #!/bin/bash
 
+sudo chmod 666 /var/run/docker.sock
+
 # Install for Standard Python (GIL)
 echo "-------------------------------------------"
 echo "--- Installing Standard Python Packages ---"

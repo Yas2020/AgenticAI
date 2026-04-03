@@ -1,6 +1,6 @@
 # scripts/test_graph.py
 import asyncio
-from app.core.engine import app # Your compiled LangGraph
+from langgraph.app.core.engine import app # Your compiled LangGraph
 from langchain_core.messages import HumanMessage
 
 async def run_test():
