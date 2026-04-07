@@ -1,12 +1,11 @@
 services:
-  # The Official LangGraph API Server
   langgraph-api:
     build:
       context: ./lg
     volumes:
       - ${LOCAL_WORKSPACE_FOLDER}/lg:/app
+      - ${LOCAL_WORKSPACE_FOLDER}/shared-artifacts:/app/artifacts
     environment:
-      - MCP_RESEARCH_URL=http://research-server:3000/mcp
       - DATABASE_URI=postgres://postgres:postgres@postgres:5432/postgres
       - REDIS_URI=redis://redis:6379
       - LANGCHAIN_TRACING_V2=true
@@ -16,8 +15,10 @@ services:
       - postgres
       - redis
       - mcp-research
+      - mcp-quant
     networks:
       - agent-net
+      - sandbox-net
 
   # Required for Persistence (Official server needs this)
   postgres:
@@ -47,6 +48,34 @@ services:
     networks:
       - agent-net
 
+  # The "Executioner" - MCP Sandbox Server
+  mcp-quant:
+    build: 
+      context: ./mcp_servers/quant_sandbox
+      dockerfile: Dockerfile
+    # Force the container to run as your host user
+    # This ensures files created in the container are owned by YOU
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - ARTIFACT_DIR=/app/artifacts
+    networks:
+      - sandbox-net
+    volumes:
+      - ${LOCAL_WORKSPACE_FOLDER}/shared-artifacts:/app/artifacts
+    # Security: No access to the internet or the database
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
 networks:
   agent-net:
     external: true
+  sandbox-net:
+    internal: true # Sandbox cannot call home to the internet
+
+volumes:
+  shared-artifacts: # This acts as the "hand-off" zone for files
+

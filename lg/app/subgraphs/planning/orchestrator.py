@@ -1,6 +1,5 @@
 from langgraph.graph import END
 from langgraph.constants import Send
-
 from app.core.state import MasterState
 
 

@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typing import Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
 from langgraph.graph import END
@@ -11,7 +12,7 @@ MAX_ITERATION = 3
 
 class ValidationResult(BaseModel):
     is_valid: bool = Field(description="True if the query is safe, clear, and on-topic.")
-    reason: str = Field(description="If invalid, the reason why. If valid, leave empty.")
+    reason: Optional[str] = Field(default=None, description="If invalid, the reason why. If valid, leave empty.")
 
 ### LLM
 validator = ChatOpenAI(model="gpt-4.1-nano", temperature=0)

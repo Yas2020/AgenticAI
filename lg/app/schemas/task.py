@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 class Task(BaseModel):
     """A granular step in the investment research process."""
     id: int
-    agent: Literal["research", "analyst", "quant_sandbox", "vector_db"]
+    agent: Literal["research", "analyst", "quant_analyst"]
     description: str
     depends_on: List[int] = Field(default_factory=list, description="IDs of tasks that must complete before this task starts")
     status: Literal["pending", "ready", "running", "completed", "failed"] = "pending"

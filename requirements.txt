@@ -14,5 +14,6 @@ langgraph-cli[inmem]
 ipykernel==6.29.0
 mcp[cli]
 langchain-mcp-adapters
-sseclient
+langgraph-checkpoint-postgres 
+psycopg[binary,pool]
 

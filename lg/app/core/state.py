@@ -15,7 +15,7 @@ class EvaluationRubric(BaseModel):
     missing_requirements: List[str]
 
 
-# Reducer function: Tells LangGraph how to merge new data into the state
+# Reducer function: Tells LangGraph how to merge new tasks into the task in the global state
 def update_plan_status(current_tasks: List[Task], updates: Union[List[Task], TaskUpdate, dict, List]) -> List[Task]:
     """
     This maps the updates by agents back to the plan 
@@ -67,7 +67,7 @@ class MasterState(MessagesState):
     plan: Annotated[List[Task], update_plan_status] = Field(default_factory=list)
     
     # Store research findings and quantitative outputs
-    artifacts: Annotated[List[dict], operator.add] = Field(default_factory=list)
+    artifacts: Annotated[List[Artifact], operator.add] = Field(default_factory=list)
     
     is_plan_valid: bool = False
     is_query_valid: bool = False
