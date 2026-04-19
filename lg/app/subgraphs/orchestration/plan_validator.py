@@ -99,8 +99,3 @@ def route_valid_plan(state: MasterState):
         return "scheduler"
     
     return "planning_architect"
-    
-    
-    
-    
-    

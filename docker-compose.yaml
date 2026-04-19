@@ -8,9 +8,10 @@ services:
     environment:
       - DATABASE_URI=postgres://postgres:postgres@postgres:5432/postgres
       - REDIS_URI=redis://redis:6379
-      - LANGCHAIN_TRACING_V2=true
+      - LANGSMITH_TRACING=true
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=investment_researcher
     depends_on:
       - postgres
       - redis

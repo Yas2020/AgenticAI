@@ -4,6 +4,8 @@ import logging
 import sys
 from pathlib import Path
 import uuid
+from typing import Annotated
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 
 # Configure logging to show internal MCP message routing
@@ -38,8 +40,13 @@ def contains_forbidden_imports(code: str):
     return None
 
 
-@mcp.tool()
-async def execute_quant_code(code: str):
+async def execute_quant_code(code: Annotated[str, Field(description="The Python code to execute for quantitative analysis. Must be valid Python code targeting the pandas, numpy, yfinance libraries.")]
+) -> str:
+    """
+    Executes Python-based quantitative analysis code. 
+    Use this tool whenever the user asks for financial calculations, backtesting, 
+    or statistical analysis that requires custom scripts.
+    """
     # 1. Protection (Keep your forbidden imports check)
     bad = contains_forbidden_imports(code)
     if bad: 
@@ -74,7 +81,7 @@ async def execute_quant_code(code: str):
             text=True,
             timeout=60,
             cwd=str(run_dir),
-            env=env # <--- Pass the environment here
+            env=env # Pass the environment variables
         )
 
         # 4. Artifact Discovery (Scanning for files)
@@ -96,32 +103,9 @@ async def execute_quant_code(code: str):
 
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": "Timeout"}
-    
-    # REMOVED: shutil.rmtree(run_dir) 
-    # Logic: We keep the files for the Notebook to read.
-
-    # finally:
-    #     # Clean up execution directory
-    #     shutil.rmtree(run_dir, ignore_errors=True)
-        
+      
         
 if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
     )
-    
-    
-    
-# @mcp.list_tools()
-# async def handle_list_tools():
-#     return {
-#         "name": "execute_quant_code",
-#         "description": "Execute Python code for quantitative analysis",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "code": {"type": "string"}
-#             },
-#             "required": ["code"]
-#         }
-#     }

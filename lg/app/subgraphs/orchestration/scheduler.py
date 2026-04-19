@@ -42,17 +42,3 @@ def route_to_agents(state: MasterState):
         Send(t.agent, {**state, "task_id": t.id}) 
         for t in state["plan"] if t.status == "running"
     ]
-
-
-    
-    
-    # return Command(
-    #     # update={"some_state_key": "some_value"}, # Optional state update
-    #     goto=[
-    #         Send(task.agent, {**state, "task_id": task.id}) 
-    #         for task in state["plan"] if task.status == "running"
-    #     ]
-    # )
-
-    
- 

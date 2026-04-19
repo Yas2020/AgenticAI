@@ -69,4 +69,3 @@ def route_valid_query(state: MasterState):
         return "planning_architect"
     else:
         return END
-    
