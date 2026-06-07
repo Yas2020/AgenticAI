@@ -1,0 +1,105 @@
+name: Offline Eval
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  unit-evals:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit offline evals
+        env:
+          EVAL_MODE: "1"
+        run: pytest evals/ -m unit -v
+
+      - name: Upload unit eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-eval-unit-report
+          path: evals/reports/
+
+  integration-evals:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: langgraph
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build MCP services
+        run: |
+          docker compose build mcp-research mcp-quant
+
+      - name: Start MCP services
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          LOCAL_WORKSPACE_FOLDER: ${{ github.workspace }}
+          UID: "1000"
+          GID: "1000"
+        run: |
+          docker network create agent-net || true
+          docker network create sandbox-net || true
+          docker compose up -d mcp-research mcp-quant
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run integration offline evals
+        env:
+          EVAL_MODE: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ vars.LANGFUSE_HOST }}
+          RESEARCH_MCP_URL: http://localhost:3000/mcp
+          QUANT_MCP_URL: http://localhost:3001/mcp
+        run: pytest evals/ -m integration -v --run-integration
+
+      - name: Upload integration eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-eval-integration-report
+          path: evals/reports/

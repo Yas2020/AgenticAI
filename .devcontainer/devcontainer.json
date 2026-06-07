@@ -1,74 +1,61 @@
-// For format details, see https://aka.ms/devcontainer.json. For config options, see the
-// README at: https://github.com/devcontainers/templates/tree/main/src/python
 {
-	"name": "PLangGraph AI Agent Dev",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	"name": "LangGraph AI Agent Dev",
 	"image": "mcr.microsoft.com/devcontainers/python:3-3.13-trixie",
-	"mounts": ["source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"],
+	
+	// 1. Safe host network fallback check
+	"initializeCommand": "docker network inspect agent-net >/dev/null 2>&1 || docker network create agent-net",
+	"runArgs": ["--network", "agent-net"],
+
 	"remoteEnv": {
 		"HOST_PROJECT_PATH": "${localWorkspaceFolder}"
 	},
+	
+	// 2. Standard user prevents all permission bugs
 	"remoteUser": "Yas",
-	"runArgs": ["--network", "agent-net"],
+
+	"features": {
+		// Crucial: This feature actually builds the Linux user account 'Yas' safely
+		"ghcr.io/devcontainers/features/common-utils:2": {
+			"username": "Yas",
+			"uid": "1000",
+			"gid": "1000",
+			"upgradePackages": false
+		},
+		// Clean, automated DoD handling (No manual volume mounts required)
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+			"moby": false,
+			"enableNonRootDocker": "true",
+			"version": "latest"
+		},
+		"ghcr.io/devcontainers/features/git:1": {},
+		"ghcr.io/devcontainers/features/github-cli:1": {}
+	},
+
 	"customizations": {
 		"vscode": {
+			"settings": {
+				"python.defaultInterpreterPath": "/usr/local/bin/python",
+				"python.languageServer": "Pylance",
+				"[python]": {
+					"editor.defaultFormatter": "charliermarsh.ruff",
+					"editor.formatOnSave": true,
+					"editor.codeActionsOnSave": {
+						"source.organizeImports": "always"
+					}
+				}
+			},
 			"extensions": [
-				// The Core
 				"ms-python.python",
 				"ms-python.vscode-pylance",
 				"ms-python.debugpy",
-				
-				// Linting & Formatting (The New Standards)
-				"charliermarsh.ruff", 
-				"ms-python.black-formatter",
-				
-				// Environment & Config
+				"charliermarsh.ruff", // Super fast Rust-based formatter & linter
 				"tamasfe.even-better-toml",
 				"redhat.vscode-yaml",
-				
-				// Quality of Life
-				"njpwerner.autodocstring",
-				"KevinRose.vsc-python-indent",
 				"streetsidesoftware.code-spell-checker"
 			]
 		}
 	},
-	
-	"features": {
-		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-			"moby": false,
-			"enableNonRootDocker": "true"
-		},
-		"ghcr.io/devcontainers/features/git:1": {},
-		"ghcr.io/devcontainers/features/sshd:1": {},
-		"ghcr.io/devcontainers-extra/features/claude-code:1": {},
-		"ghcr.io/devcontainers-extra/features/gh-cli:1": {},
-		"ghcr.io/devcontainers-extra/features/ruff:2": {},
-		"ghcr.io/devcontainers-extra/features/uv:1": {},
-		"ghcr.io/devcontainers/features/common-utils:2": {
-			"installZsh": true,
-			"configureZshAsDefaultShell": true,
-			"username": "Yas",
-			"upgradePackages": true
-		},
-		"ghcr.io/devcontainers-extra/features/zsh-plugins:0": {
-			"plugins": "git zsh-autosuggestions zsh-syntax-highlighting",
-			"theme": "robbyrussell"
-		}
-	},
 
-	// Features to add to the dev container. More info: https://containers.dev/features.
-	// "features": {},
-
-	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	// "forwardPorts": [],
-
-	// Use 'postCreateCommand' to run commands after the container is created.
+	// 3. Guaranteed clean global package installations
 	"postCreateCommand": "bash .devcontainer/setup.sh"
-
-	// Configure tool-specific properties.
-	// "customizations": {},
-
-	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
-	// "remoteUser": "root"
 }

@@ -1,23 +1,30 @@
 import asyncio
 import traceback
 import json
-from typing import Literal, Optional
 from datetime import datetime, timezone
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
-from app.schemas.task import TaskUpdate
+from typing import Literal, Optional
+
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END
+from langgraph.types import Send
+
+from app.schemas.task import Task, TaskUpdate
 from app.core.state import MasterState
 from app.schemas.artifact import Artifact
-from langchain_openai import ChatOpenAI
-from langgraph.types import Send 
-from app.services.mcp.mcp_clients import mcp_manager # Import the shared instance
+from app.services.artifacts.evidence import format_evidence_bundle
+from app.services.mcp.mcp_clients import mcp_manager
 
 MAX_ITERATION = 2
 
+
 class QuantInput(MasterState):
+    """Subgraph-local state for quant execution and audit reflection loops."""
+
     task_id: int
-    audit_status: Optional[Literal["passed", "failed"]]
-    audit_feedback: Optional[str | dict]
-    retry_count: Optional[int] = 0
+    retry_count: int = 0
+    audit_status: Optional[Literal["passed", "failed"]] = None
+    audit_feedback: Optional[str] = None
 
 # 1. Initialize the LLM
 model = ChatOpenAI(model="gpt-4o", temperature=0)
@@ -32,7 +39,7 @@ Your goal is to write deterministic Python code to solve financial tasks.
 - Use 'matplotlib' for charts.
 - You have access to a pre-defined string variable called ARTIFACT_DIR. DO NOT import os or sys. To save your plots, use:
 plt.savefig(ARTIFACT_DIR + '/plot.png')
-- Use data found by the Researcher is provided in the Context section below.
+- Use data found by the Researcher provided in the Context below.
 
 Context from Researcher: {research_context}
 
@@ -42,28 +49,85 @@ Task: {task_description}
 1. NO HALLUCINATIONS: You are strictly forbidden from using "placeholder," "mock," or "example" data. 
 2. CONTEXT-ONLY: If a specific data point (like Data Center Revenue) is present in the RESEARCH_CONTEXT, you MUST use those exact figures.
 3. FAIL-FAST: If the data is missing from the context, do not invent it. State "DATA_MISSING" in your code comments.
-4. Use the available quantitative tool to perform calculations. 
-5. Your script MUST terminate with these exact lines of code. No exceptions.
+4. Call the `execute_quant_code` tool with your Python script in the `code` argument. Do not paste code in the chat — only via the tool.
+5. UNIT STANDARD: You MUST use the units found in the Research Data (usually Billions). Do not convert to Millions unless the research specifically uses Millions.
+6. MATH > TEXT: If the research provides both a growth rate (e.g., 75%) and the raw revenue numbers, and they do not mathematically align, use the raw revenue numbers to calculate your own growth rate.
+7. EXPLAIN DISCREPANCIES: If you find a data conflict, add a discrepancy_note key to your summary dictionary explaining your choice.
+8. Your script MUST terminate with these exact lines of code. No exceptions.
 Do not print any other text, explanations, or summaries outside of this JSON block.
-6. UNIT STANDARD: You MUST use the units found in the Research Data (usually Billions). Do not convert to Millions unless the research specifically uses Millions.
-7. MATH > TEXT: If the research provides both a growth rate (e.g., 75%) and the raw revenue numbers, and they do not mathematically align, use the raw revenue numbers to calculate your own growth rate.
-8. EXPLAIN DISCREPANCIES: If you find a data conflict, add a discrepancy_note key to your summary dictionary explaining your choice.
 
+Your script must end with:
 import json
 # Ensure all numpy types or decimals are converted to standard floats/ints first
 print(json.dumps(summary, indent=2))
 """
 
-def format_research(artifacts):
-    formatted = []
-    for a in artifacts:
-        if a.source == "research" and isinstance(a.content, dict):
-            # Transform dict into a readable block
-            summary = "\n".join([f"- {k}: {v}" for k, v in a.content.items()])
-            formatted.append(f"RESEARCH DATA:\n{summary}")
-        else:
-            formatted.append(str(a.content))
-    return "\n\n".join(formatted)
+
+def _last_quant_artifact(state: QuantInput) -> Artifact | None:
+    return next(
+        (a for a in reversed(state["artifacts"]) if a.artifact_type == "quantitative_analyst"),
+        None,
+    )
+
+
+def _build_quant_messages(
+    state: QuantInput, task: Task, research_context: str
+) -> list[BaseMessage]:
+    system = SystemMessage(
+        content=QUANT_ANALYST_PROMPT.format(
+            research_context=research_context,
+            task_description=task.description,
+        )
+    )
+    initial = HumanMessage(
+        content=(
+            f"Task: {task.description}\n"
+            "Write the Python analysis script and call execute_quant_code with it. "
+            "Do not reply with code in plain text."
+        )
+    )
+
+    audit_feedback = state.get("audit_feedback")
+    if audit_feedback:
+        last = _last_quant_artifact(state)
+        code = ""
+        if last and isinstance(last.content, dict):
+            code = last.content.get("code") or ""
+        return [
+            system,
+            initial,
+            HumanMessage(
+                content=(
+                    "The Auditor rejected your previous attempt.\n\n"
+                    f"Auditor feedback:\n{audit_feedback}\n\n"
+                    f"Previous code:\n```python\n{code}\n```\n\n"
+                    "Fix the issues and call execute_quant_code with a corrected script."
+                )
+            ),
+        ]
+
+    if state.get("retry_count", 0) > 0:
+        last = _last_quant_artifact(state)
+        err = "Execution failed with no error details."
+        if last and isinstance(last.content, dict):
+            err = (
+                last.content.get("stderr")
+                or last.content.get("error")
+                or err
+            )
+        return [
+            system,
+            initial,
+            HumanMessage(
+                content=(
+                    "Your previous script failed to execute successfully.\n\n"
+                    f"Error output:\n{err}\n\n"
+                    "Fix the script and call execute_quant_code again."
+                )
+            ),
+        ]
+
+    return [system, initial]
 
 
 async def quant_node(state: QuantInput):
@@ -74,20 +138,13 @@ async def quant_node(state: QuantInput):
     # 1. Pull the quant task from the global state
     task = next(t for t in state["plan"] if t.id == state["task_id"])
     if task is None:
-        return {"plan": [TaskUpdate(task_id=state["task_id"], status="failed", error_message="Task not found")]}
+        return {"plan": [TaskUpdate(id=state["task_id"], status="failed", error_message="Task not found")]}
         
     # 2. Context Injection: Summarize what the researcher found
     # This prevents the Quant agent from having to 'search' the whole history
-    research_context = format_research(state["artifacts"])
+    research_context = format_evidence_bundle(state["artifacts"], sources=("research",))
     
-    # 3. Setup history
-    messages = [
-        SystemMessage(content=QUANT_ANALYST_PROMPT.format(
-            research_context=research_context, 
-            task_description=task.description
-            )
-        )
-    ]
+    messages = _build_quant_messages(state, task, research_context)
     
     try: 
         # 4. Get the tools from the ALREADY OPEN session
@@ -99,10 +156,10 @@ async def quant_node(state: QuantInput):
         # 5. Bind tools to the base model
         tool_model = model.bind_tools(quant_tools)
         
-        # 6. Let the model to choose tools, prepare args and number of times they call tools etc... But force it to use the tool "execute_quant_code"
+        # 6. Let the model to choose tools, prepare args and number of times they call tools etc... But you may also force it to use the tool "execute_quant_code"
         response = await tool_model.ainvoke(
             messages, 
-            tool_choice={"type": "function", "function": {"name": "execute_quant_code"}}
+            # tool_choice={"type": "function", "function": {"name": "execute_quant_code"}}
         )
         # If the model decides to use the tool, response is an AIMessage empty content with tool call extra kwargs
         messages.append(response) # Keep the assistant's request in history
@@ -136,7 +193,7 @@ async def quant_node(state: QuantInput):
                 )
             # 10. FINAL STEP: Call the LLM one last time 
             # Let the model see the results (Optional, but good for context) - no need to add the return to messages
-            await tool_model.ainvoke(messages)
+            # await tool_model.ainvoke(messages)
         
             # 11. Access the first element of the list (mcp returns a list TextContent()) and get the 'text' content
             if mcp_response and len(mcp_response) > 0:
@@ -152,7 +209,8 @@ async def quant_node(state: QuantInput):
                 mcp_data = {"status": "error", "stdout": raw_tool_output, "stderr": "Failed to parse JSON"}
             
             # 13. Return the standard response
-            return {
+            success = mcp_data.get("status") == "success"
+            update: dict = {
                 "artifacts": [
                     Artifact(
                         artifact_type="quantitative_analyst",
@@ -161,17 +219,21 @@ async def quant_node(state: QuantInput):
                             "code": generated_code,
                             "stdout": mcp_data.get("stdout"),
                             "stderr": mcp_data.get("stderr"),
-                            "results": mcp_data.get("result"), # Your parsed JSON from the script
-                            "plots": mcp_data.get("artifacts")  # The file paths
+                            "results": mcp_data.get("result"),
+                            "plots": mcp_data.get("artifacts"),
+                            "run_id": mcp_data.get("run_id"),
                         },
                         task_id=state["task_id"],
                         timestamp=datetime.now(timezone.utc).isoformat(),
-                        success=mcp_data.get("status") == "success",
+                        success=success,
                         error=None
                     )
                 ],
                 "messages": messages
             }
+            if not success:
+                update["retry_count"] = state.get("retry_count", 0) + 1
+            return update
             
         # If the model doesnt make a tool call in its response, its not doing what its supposed to do! 
         return {
@@ -186,7 +248,8 @@ async def quant_node(state: QuantInput):
                     error=None
                 )
             ],
-            "messages": messages + [HumanMessage(content="You didn't execute any code. Please use the execute_quant_code tool.")]
+            "retry_count": state.get("retry_count", 0) + 1,
+            "messages": messages,
         }
     except Exception as e:
         traceback.print_exc() # This will show the EXACT line and error in your terminal
@@ -199,12 +262,13 @@ async def quant_node(state: QuantInput):
         ]}
  
 def route_quant(state: QuantInput):
-    # If the artifact indicates a tool-call failure, immediately route back to the quant_node
     last_artifact = state["artifacts"][-1]
     if not last_artifact.success:
-        retry_count = state.get("retry_count", 0) + 1
-        return Send("quant_node", {**state, "retry_count": retry_count}) # Bypass audit logic, just kick it back
-    
+        retry_count = state.get("retry_count", 0)
+        if retry_count < MAX_ITERATION:
+            return Send("quant_node", state)
+        return "auditor_node"
+
     return "auditor_node"
    
 
@@ -252,10 +316,34 @@ async def auditor_node(state: QuantInput):
             "audit_status": "passed",
             "audit_feedback": "Task marked failed by Quant Analyst - No Audition Needed"
         }
+
+    quant_artifact = next(
+        a for a in reversed(state["artifacts"]) if a.artifact_type == "quantitative_analyst"
+    )
+    if not quant_artifact.success and state.get("retry_count", 0) >= MAX_ITERATION:
+        content = (
+            quant_artifact.content
+            if isinstance(quant_artifact.content, dict)
+            else {}
+        )
+        return {
+            "plan": [
+                TaskUpdate(
+                    id=state["task_id"],
+                    status="failed",
+                    error_message=(
+                        content.get("error")
+                        or content.get("stderr")
+                        or "Quant execution failed after max retries"
+                    ),
+                )
+            ],
+            "audit_status": "failed",
+            "audit_feedback": "Quant execution retries exhausted",
+        }
         
     # 2. Get the latest artifacts from quant node and research node
-    quant_artifact = next(a for a in reversed(state["artifacts"]) if a.artifact_type == "quantitative_analyst")
-    research_context = format_research(state["artifacts"])
+    research_context = format_evidence_bundle(state["artifacts"], sources=("research",))
     
     # 3. Extract code and result
     code = quant_artifact.content.get("code")
@@ -286,50 +374,41 @@ async def auditor_node(state: QuantInput):
         }
     retry_count = state.get("retry_count", 0)
     if retry_count < MAX_ITERATION:
-        messages.append(HumanMessage(
-            content=f'''The Auditor found some problems with the code generated by the Quant Analyst. 
-                        Auditor Feedback: {response.content}
-                        
-                        Please carefully regenerate the code.'''))
         return {
             "audit_status": "failed",
             "audit_feedback": response.content,
             "retry_count": retry_count + 1,
-            "messages": messages
+            "messages": messages,
         }
-    if retry_count == MAX_ITERATION:
-        print("MAX RETRIES REACHED: Moving on despite audit failure.")
-        messages.append(HumanMessage(
-            content=f'''Senior Quantitative Analyst Output Code Rejected by The Auditor - Reached Maximum Retries: {MAX_ITERATION}!'''))
-        return {
-            "plan": [
-                TaskUpdate(
-                    id=state["task_id"], 
-                    status="failed", 
-                    error_message=response.content
-                )
-            ],
-            "audit_status": "failed",
-            "audit_feedback": response.content,
-            "retry_count": retry_count + 1,
-            "messages": messages   
-        }     
 
-def route_audit(state: QuantInput):
-    # Check the last status set by the auditor node
+    print("MAX RETRIES REACHED: Moving on despite audit failure.")
+    return {
+        "plan": [
+            TaskUpdate(
+                id=state["task_id"],
+                status="failed",
+                error_message=response.content,
+            )
+        ],
+        "audit_status": "failed",
+        "audit_feedback": response.content,
+        "retry_count": retry_count + 1,
+        "messages": messages,
+    }
+
+
+def route_audit_subgraph(state: QuantInput):
     if state.get("audit_status") == "passed":
-        return "scheduler" # Or next logical step
-    
-    # If we've failed too many times, exit to avoid infinite loops
+        return END
+
     task = next(t for t in state["plan"] if t.id == state["task_id"])
-    if task.status == "failed": # Either by Quant Analyst or by Auditor because of max retires
-        return "scheduler"
-    
-    return Send("quant_analyst", {**state, 
-                                  "task_id": state["task_id"],
-                                  "audit_status": state["audit_status"],
-                                  "audit_feedback": '',
-                                  "retry_count": state["retry_count"]}) 
+    if task.status == "failed":
+        return END
+
+    if state.get("retry_count", 0) >= MAX_ITERATION:
+        return END
+
+    return "quant_node"
 
 
 

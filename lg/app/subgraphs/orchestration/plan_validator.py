@@ -53,29 +53,35 @@ def missing_dep(tasks):
     return None
 
 
+def collect_plan_errors(tasks) -> list[str]:
+    """Return structural DAG validation errors for a plan."""
+    errors: list[str] = []
+    if not tasks:
+        errors.append("Plan is empty.")
+        return errors
+
+    ids = [t.id for t in tasks]
+    if len(ids) != len(set(ids)):
+        errors.append("Task IDs are not unique.")
+
+    if len(ids) > MAX_TASKS:
+        errors.append(f"Too many tasks {len(ids)} in the plan! Max is {MAX_TASKS}.")
+
+    if not validate_dag(tasks):
+        errors.append("DAG contains circular dependencies.")
+
+    dep = missing_dep(tasks)
+    if dep:
+        errors.append(f"DAG contains missing dependencies {dep}.")
+
+    return errors
+
+
 #  --- Node ---
 
 def plan_validator(state: MasterState):
     
-    ids = [t.id for t in state["plan"]]
-    errors = []
-
-    # Check Ids uniqueness
-    if len(ids) != len(set(ids)):
-        errors.append("Task IDs are not unique.")
-    
-    # Check tasks limit
-    if len(ids) > MAX_TASKS:
-        errors.append(f"Too many tasks {len(ids)} in the plan! Max is {MAX_TASKS}.")
-
-    # Check possible cycles in dependencies
-    if not validate_dag(state["plan"]):
-        errors.append("DAG contains circular dependencies.")
-        
-    # Check for missing dependencies
-    dep = missing_dep(state["plan"])
-    if dep:
-        errors.append(f"DAG contains missing dependencies {dep}.")
+    errors = collect_plan_errors(state["plan"])
         
     if errors:
         error_msg = f"DAG is not valid:\n{'\n'.join(errors)}\n\n Please regenerate."

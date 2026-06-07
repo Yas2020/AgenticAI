@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir \
     pandas \
     numpy \
     matplotlib \
+    scikit-learn \
     yfinance \
     scipy \
     statsmodels

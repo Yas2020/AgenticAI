@@ -44,7 +44,7 @@ async def research_agent(state: AgentInput):
     # Find the task assigned to this agent with specific task id
     task = next((t for t in state["plan"] if t.id == state["task_id"]), None)
     if task is None:
-        return {"plan": [TaskUpdate(task_id=state["task_id"], status="failed", error_message="Task not found")]}
+        return {"plan": [TaskUpdate(id=state["task_id"], status="failed", error_message="Task not found")]}
     topic = state.get("topic", "General Investment")
     
     try: 
@@ -52,7 +52,7 @@ async def research_agent(state: AgentInput):
         print("DEBUG: Loading tools from session...")
         # Use cached tools if possible
         research_tools = await mcp_research.get_tools()
-        print("Tools Received. Here are the tools:")
+        print("Tools Received:")
         print(research_tools)
         
         # 1. Setup history

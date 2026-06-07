@@ -1,0 +1,3 @@
+# Keep report directory in repo without committing generated artifacts
+*
+!.gitkeep

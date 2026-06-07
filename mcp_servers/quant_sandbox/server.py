@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import logging
 import sys
@@ -40,8 +41,8 @@ def contains_forbidden_imports(code: str):
     return None
 
 
-async def execute_quant_code(code: Annotated[str, Field(description="The Python code to execute for quantitative analysis. Must be valid Python code targeting the pandas, numpy, yfinance libraries.")]
-) -> str:
+@mcp.tool()
+async def execute_quant_code(code: Annotated[str, Field(description="The Python code to execute for quantitative analysis. Must be valid Python code targeting the pandas, numpy, yfinance libraries.")]) -> str:
     """
     Executes Python-based quantitative analysis code. 
     Use this tool whenever the user asks for financial calculations, backtesting, 
@@ -49,13 +50,13 @@ async def execute_quant_code(code: Annotated[str, Field(description="The Python 
     """
     # 1. Protection (Keep your forbidden imports check)
     bad = contains_forbidden_imports(code)
-    if bad: 
-        return {"status": "error", "message": f"Forbidden: {bad}"}
+    if bad:
+        return json.dumps({"status": "error", "message": f"Forbidden: {bad}"})
 
     # 2. Setup Directory
     run_id = str(uuid.uuid4())[:8]
     # Ensure this is the folder MAPPED in docker-compose
-    base_artifacts_path = Path("/app/artifacts") 
+    base_artifacts_path = Path(os.getenv("ARTIFACT_DIR", "/app/artifacts")) 
     run_dir = base_artifacts_path / f"run_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True, mode=0o777)
 
@@ -93,16 +94,18 @@ async def execute_quant_code(code: Annotated[str, Field(description="The Python 
                 "rel_path": f"run_{run_id}/{file.name}" # Path for Notebook
             })
 
-        return {
-            "status": "success" if result.returncode == 0 else "failed",
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-            "artifacts": generated_files,
-            "run_id": run_id
-        }
+        return json.dumps(
+            {
+                "status": "success" if result.returncode == 0 else "failed",
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+                "artifacts": generated_files,
+                "run_id": run_id,
+            }
+        )
 
     except subprocess.TimeoutExpired:
-        return {"status": "error", "message": "Timeout"}
+        return json.dumps({"status": "error", "message": "Timeout"})
       
         
 if __name__ == "__main__":

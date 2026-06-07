@@ -16,3 +16,6 @@ psycopg[binary,pool]
 python-dotenv
 sse-starlette
 httpx
+pytest
+pytest-asyncio
+langfuse>=4.2.0

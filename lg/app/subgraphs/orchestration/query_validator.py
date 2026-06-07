@@ -1,3 +1,5 @@
+import os
+
 from pydantic import BaseModel, Field
 from typing import Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -9,6 +11,7 @@ from app.core.state import MasterState
 
 
 MAX_ITERATION = 3
+EVAL_MODE = os.getenv("EVAL_MODE", "0") == "1"
 
 class ValidationResult(BaseModel):
     is_valid: bool = Field(description="True if the query is safe, clear, and on-topic.")
@@ -49,13 +52,21 @@ async def query_validator(state: MasterState):
         
         if result.is_valid:
             return {"is_query_valid": True}
-        else:
-            error_msg = f"ERROR: I can't process your query: {result.reason}. Could you please clarify your request?" 
-            user_input = interrupt(
-                value=error_msg, # What the user sees
-                update={"messages": [AIMessage(content=error_msg)]} # Updates the state before pausing
-            )
 
+        error_msg = (
+            f"ERROR: I can't process your query: {result.reason}. "
+            "Could you please clarify your request?"
+        )
+        if EVAL_MODE:
+            return {
+                "is_query_valid": False,
+                "messages": [AIMessage(content=error_msg)],
+            }
+
+        user_input = interrupt(
+            value=error_msg,
+            update={"messages": [AIMessage(content=error_msg)]},
+        )
         count += 1
     
     # If we exit the loop, we hit MAX_ITERATION

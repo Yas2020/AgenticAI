@@ -1,44 +1,99 @@
 from langgraph.graph import END
-from langgraph.constants import Send
+from langgraph.types import Send
 from app.core.state import MasterState
+
+
+def _task_map(state: MasterState) -> dict[int, object]:
+    return {t.id: t for t in state["plan"]}
+
+
+def _promote_pending_tasks(state: MasterState) -> list[dict]:
+    """Mark tasks ready or failed (skipped) based on dependency outcomes."""
+    task_map = _task_map(state)
+    updates: list[dict] = []
+
+    for task in state["plan"]:
+        if task.status != "pending":
+            continue
+        if not task.depends_on:
+            task.status = "ready"
+            continue
+
+        dep_statuses = [
+            task_map[dep_id].status
+            for dep_id in task.depends_on
+            if dep_id in task_map
+        ]
+        if not dep_statuses or len(dep_statuses) != len(task.depends_on):
+            updates.append(
+                {
+                    "id": task.id,
+                    "status": "failed",
+                    "error_message": "Invalid or missing dependency in plan.",
+                }
+            )
+            continue
+
+        if any(status == "failed" for status in dep_statuses):
+            if task.agent == "analyst" and any(status == "completed" for status in dep_statuses):
+                task.status = "ready"
+            else:
+                failed_deps = [
+                    dep_id
+                    for dep_id in task.depends_on
+                    if dep_id in task_map and task_map[dep_id].status == "failed"
+                ]
+                updates.append(
+                    {
+                        "id": task.id,
+                        "status": "failed",
+                        "error_message": (
+                            f"Skipped: upstream task(s) {failed_deps} failed."
+                        ),
+                    }
+                )
+            continue
+
+        if all(status == "completed" for status in dep_statuses):
+            task.status = "ready"
+
+    return updates
 
 
 def scheduler(state: MasterState):
     """
-        Scheduler: Updates the status of tasks whose dependencies are 'complete' to 'ready'. 
-        Tasks are assigned by the planning_architect.
-        Scheduler acts as Dynamic Router: It looks for 'ready' tasks and dispatches them to their specific agent nodes.
+    Scheduler: promote pending tasks when dependencies are satisfied, skip or
+    partially run analyst when upstream failures occur, and dispatch ready work.
     """
-    
-    # If all tasks complete, nothing left to do 
-    if all(t.status == "completed" for t in state["plan"]):
+    if all(t.status in ("completed", "failed") for t in state["plan"]):
         return {}
-    
-    task_map = {t.id: t for t in state["plan"]}
 
-    for task in state["plan"]:
-        if task.status == "pending" and all(task_map[dep].status == "completed" for dep in task.depends_on):
-            task.status = "ready"
+    skip_updates = _promote_pending_tasks(state)
 
-    ##############   
-    # Todo: Decide what to do with failed tasks! retires? ... logic of retires
-    ##############
+    running_updates = [
+        {"id": t.id, "status": "running", "error_message": None}
+        for t in state["plan"]
+        if t.status == "ready"
+    ]
 
-    # Update the status to running - we use dict here not TaskUpdate which is reserved for agent nodes only - it can not updpate to "running"
-    return {
-        "plan": [{"id": t.id, "status": "running", "error_message": None} for t in state["plan"] if t.status == "ready"]
-    }
+    if not skip_updates and not running_updates:
+        return {}
 
+    return {"plan": skip_updates + running_updates}
 
 
 def route_to_agents(state: MasterState):
-    
-    # If nothing is running and everything is completed, NOW return END
-    if all(t.status == "completed" for t in state["plan"]):
+    if all(t.status in ("completed", "failed") for t in state["plan"]):
         return END
-    
-    # Fan out tasks to the corresponding agents
+
     return [
-        Send(t.agent, {**state, "task_id": t.id}) 
-        for t in state["plan"] if t.status == "running"
+        Send(
+            t.agent,
+            {
+                **state,
+                "task_id": t.id,
+            },
+        )
+        for t in state["plan"]
+        if t.status == "running"
     ]

@@ -1,13 +1,17 @@
-import os
 import asyncio
-import uuid
-from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+
+from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
+
 from app.schemas.task import TaskUpdate
 from app.core.state import MasterState
 from app.schemas.artifact import Artifact
-from langchain_core.messages import SystemMessage
-from langchain_openai import ChatOpenAI
+from app.services.artifacts.evidence import (
+    build_source_citations,
+    format_evidence_bundle,
+)
+from app.services.artifacts.paths import write_final_report
 
 
 class AnalystInput(MasterState):
@@ -16,85 +20,93 @@ class AnalystInput(MasterState):
 # 5. Call the "Big Gun" model for synthesis
 model = ChatOpenAI(model="gpt-4o", temperature=0)
 
-def format_research(artifacts, source):
-    formatted = []
-    for a in artifacts:
-        if a.source == source and isinstance(a.content, dict):
-            # Transform dict into a readable block
-            summary = "\n".join([f"- {k}: {v}" for k, v in a.content.items()])
-            formatted.append(f"RESEARCH DATA:\n{summary}")
-        else:
-            formatted.append(str(a.content))
-    return "\n\n".join(formatted)
-
 
 async def analyst_agent(state: MasterState):
     
     # 2. Pull the quant task from the global state
     task = next(t for t in state["plan"] if t.id == state["task_id"])
     if task is None:
-        return {"plan": [TaskUpdate(task_id=state["task_id"], status="failed", error_message="Task not found")]}
+        return {"plan": [TaskUpdate(id=state["task_id"], status="failed", error_message="Task not found")]}
     
     # 3. Gather all context
-    research_docs = format_research(state["artifacts"], "research")
-    quant_results = format_research(state["artifacts"], "quant_analyst")
-    
-    # 4. Construct the high-stakes prompt
+    research_docs = format_evidence_bundle(state["artifacts"], sources=("research",))
+    quant_results = format_evidence_bundle(state["artifacts"], sources=("quant_analyst",))
+    citation_index, _sources = build_source_citations(state["artifacts"])
+
+    failed_upstream = [
+        t
+        for t in state["plan"]
+        if t.status == "failed" and t.id != task.id
+    ]
+    failure_notes = ""
+    if failed_upstream:
+        lines = [
+            f"- Task {t.id} ({t.agent}): {t.error_message or 'failed'}"
+            for t in failed_upstream
+        ]
+        failure_notes = (
+            "### UPSTREAM TASK FAILURES (do not invent data to replace these):\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+
     prompt = f"""
-    You are a Senior Investment Analyst. You must synthesize the following data into a final report.
-    
+    You are a Senior Investment Analyst. Synthesize the evidence into a final investment report.
+
+    ### SOURCE INDEX (cite every factual claim as [^1], [^2], etc. matching the numbers below):
+    {citation_index}
+
     ### RESEARCH FINDINGS:
     {research_docs}
-    
+
     ### QUANTITATIVE VALUATION (JSON):
-    {quant_results}
-    
+    {quant_results or "(no quantitative output — explain limitation in prose)"}
+
+    {failure_notes}
     ### YOUR MISSION:
-    1. CROSS-CHECK: Does the revenue/growth in the Quant math match the Research facts? 
-    2. VALUATION: Is the DCF value realistic compared to the market context?
-    3. FINAL VERDICT: Provide a 'BUY', 'HOLD', or 'SELL' recommendation.
-    
+    1. CROSS-CHECK: Does quant math align with research where both exist?
+    2. If upstream tasks failed, state uncertainty explicitly — do not fabricate missing figures.
+    3. VALUATION: Assess realism vs context when data exists.
+    4. FINAL VERDICT: BUY / HOLD / SELL when sufficient evidence; otherwise "INSUFFICIENT DATA".
+
     ### FORMAT:
-    Output your report in clean Markdown. End with a section titled 'EVALUATION' 
-    where you grade the accuracy of the preceding agents.
+    - Clean Markdown with inline citations [^1], [^2], etc. matching SOURCE INDEX.
+    - End with a "## References" section listing each [^n] URL or source label.
+    - End with a section titled 'EVALUATION' grading preceding agents.
     """
     
     response = await model.ainvoke([SystemMessage(content=prompt)])
-    
-    # 6. Save the markdown report
-    run_id = str(uuid.uuid4())[:8]
-    base_artifacts_path = Path("/app/artifacts/final_report") 
-    run_dir = base_artifacts_path / f"run_{run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True, mode=0o777)
-    os.chmod(run_dir, 0o777)
-    
-    report_path = run_dir / "final_report.md"
-    
-    metadata_header = f"""---
-    
-    Run ID: {run_id}
-    Model: {model.model_name}
-    Timestamp: {datetime.now().isoformat()}
----
 
-"""
-    
-    report_path.write_text(metadata_header + response.content)
-    
-    # 7. Save the Final Report as a unique artifact
+    query = next(
+        (
+            getattr(msg, "content", "")
+            for msg in state.get("messages", [])
+            if getattr(msg, "content", None)
+        ),
+        "",
+    )
+    report_path = write_final_report(
+        response.content,
+        topic=state.get("topic", "equity research"),
+        query=query if isinstance(query, str) else str(query),
+        model_name=model.model_name,
+        artifacts=state.get("artifacts", []),
+    )
+    print(f"Final report written to {report_path}")
+
     return {
         "artifacts": [
             Artifact(
-                artifact_type="final_report", 
+                artifact_type="final_report",
                 task_id=task.id,
                 source=task.agent,
                 content=response.content,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 success=True,
-                error=None
+                error=None,
             )
         ],
-        "plan": [TaskUpdate(id=task.id, status="completed", error_message=None)]
+        "plan": [TaskUpdate(id=task.id, status="completed", error_message=None)],
     }
 
 

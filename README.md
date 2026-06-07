@@ -1,303 +1,275 @@
-## Overview
+# Agentic Investment Research
 
-Built a production-oriented multi-agent system for automated investment research using modern agentic AI patterns.
+Production-oriented multi-agent system for automated equity research: planning, web research, quantitative analysis, audit loops, and final report synthesis.
 
-The system demonstrates:
+**Example:** *“Research Microsoft cloud revenue, run a quantitative growth analysis, and produce an investment report.”*  
 
-- multi-agent coordination and task decomposition
-- tool-augmented reasoning (web search + code execution)
-- workflow orchestration using DAG-based planning
-- persistence and long-running execution
-- evaluation and self-reflection loops
+**Output:** Markdown investment report backed by research artifacts and optional quant outputs (charts, simulations).
 
-**Example task:**
-User query → “Analyze NVIDIA and generate an investment report”
+## Why this matters
 
-**Output:**
-Structured markdown report with qualitative analysis and quantitative insights (charts, simulations)
+Modern agent systems combine **reasoning**, **tools**, and **orchestration** instead of a single LLM call. This project mirrors that pattern:
 
-## Why This Matters
-
-This project demonstrates how modern ML systems move beyond single-model pipelines into **coordinated agent systems** that:
-
-- combine reasoning, tools, and execution
-- handle long-running workflows
-- enforce reliability via validation loops
-- separate planning from execution
-
-This mirrors real-world production systems where ML models interact with multiple services and require orchestration, monitoring, and fault tolerance.
+- DAG-based task planning and parallel dispatch
+- Tool-augmented agents (search + code sandbox via MCP)
+- Reflection loops (quant auditor)
+- Persistence (Postgres checkpoints) and offline evaluation
 
 ## Architecture
 
-The system follows an **Orchestrator–Worker (hierarchical) design**:
+**Orchestrator–worker** design implemented with [LangGraph](https://github.com/langchain-ai/langgraph):
 
-- **Orchestrator**
-  - Planner → generates DAG of tasks
-  - Scheduler → manages execution and dependencies
-
-- **Research Agent**
-  - Performs web search via MCP tools
-
-- **Quant Agent**
-  - Generates and executes Python code for analysis
-
-- **Auditor**
-  - Validates outputs and enforces correctness (reflection loop)
-
-- **Analyst**
-  - Produces final investment report
-
-I used LangGraph for implementation. 
+| Layer | Role |
+|-------|------|
+| **Query validator** | Safety / relevance gate (small model; HITL when not in eval mode) |
+| **Planner** | User query → DAG of tasks per agent |
+| **Plan validator** | Cycle / orphan / dependency checks |
+| **Scheduler** | Dependency-aware dispatch; failed upstream tasks skip dependents (analyst may run on partial evidence) |
+| **Research** | Web search via MCP → structured artifacts with `sources[]` URLs |
+| **Quant subgraph** | PAL code generation → MCP sandbox → **auditor** retry loop |
+| **Analyst** | Synthesizes evidence into a cited markdown report (`[^n]` + References) |
 
 ![](./images/graph.png)
 
-
-### User Query Validator
-User query is first validated for safety, clearance and relevance to the topic. This is done by a small model. If not passed, the user is ask to edit the query (HITL). After maximum number of iteration of failures, graph ends.
-
-### Orchestrator
-Controls the full workflow using a graph-based execution model.
-
-**Framework:** LangGraph
-
-Responsibilities:
-- state management
-- task orchestration
-- retries and failure handling
-- agent coordination
-
-#### Planner
-
-- Converts user query into a **DAG of dependent tasks**
-- Tasks are assigned to specialized agents (Research, Quant, Analyst)
-- Plan is validated for:
-  - DAG correctness (no cycles)
-  - valid dependencies
-
-If the plan is valid, it is sent to the scheduler to be distributed among agents. 
-
-#### Scheduler
-
-- Tracks task states: `pending → ready → running → completed/failed`
-- Dispatches tasks to agents when dependencies are satisfied
-- Handles:
-  - retries
-  - failure escalation (human-in-the-loop)
-- Terminates when all tasks complete
-
-### Research Agent
-This agent's job is to gather fresh data from the web or retrieve documents for database. In this application, it only performs web search using **MCP tools**. It summarizes information into the researcher artifacts.
-
-- Tools: **Tavily Search** or DuckDuckGo are great for structured research.
-- Strategy: This agent might receive multiple independent tasks from the scheduler for multiple searches from different angles (e.g., competitors, financial, recent news) which will be conducted in parallel. Then the result will be summarized and saved into the researcher's artifact. 
-
 ### Quant subgraph
-This subgraph consists of Quant agent, a deterministic validator and the Auditor agent.
 
-#### Quant Analyst
-Quant agent implements Program-Aided Language (PAL) Models. It is the "Calculation" agent that should never "hallucinate" math; it should write and run code instead. It can run data analytics 
+- **Quant analyst** — writes Python, executes in Modal sandbox (MCP), no math hallucination in prose.
+- **Auditor** — compares code/stdout to research; `PASS` / `FAIL` with bounded retries (`MAX_ITERATION`).
+- **Routing** — `retry_count` is incremented on failed executions in node state (not only via routing). After `MAX_ITERATION`, the auditor marks the task failed and returns to the scheduler. Eval runs set `recursion_limit` as a backstop.
 
-- Tools: A Python REPL or Sandbox environment provided via an MCP server 
-- Environment (Quant Sandbox): Uses Modal Sandboxes to execute untrusted code safely without crashing the main graph
-- Role: Transforms raw financial statements from the Research agent into visualizations, charts, or complex ratio analyses. It can run Monte Carlo simulations, data analytics tools to provide quantitative support for the final report.  
+### Scheduler & failure handling
 
-#### Auditor
-Perform self-reflection task. Checks for hallucinations, logical or runtime errors, discrepancy, and provides feedback. Judges the results from Quant node for required outputs, validity of code and data used in the code, discrepancies between the results from Quant agent and research data. PASS or FAIL if requirements not met.
+When an upstream task **fails**, the scheduler:
 
-If failed, the task will be returned to the Quant Agent with the feedback from Auditor
-- This cycle repeats for a MAX_ITERATION allowed
-- After max retires reached, the task is marked failed by Auditor and returned to the scheduler
+- Marks dependent tasks **failed** (skipped) with a clear `error_message`, **except**
+- **Analyst** — still runs if **any** dependency completed (e.g. research succeeded but quant failed), so the report can state limitations instead of hanging or looping.
 
-Responsibilities:
+The graph terminates when every task is `completed` or `failed` (no indefinite scheduler cycles).
 
-• verify results
-• detect hallucinations
-• suggest retries
+### Analyst & source citations
 
-Often used in Evaluator‑Optimizer loops.
+- Research artifacts include a `sources` list (URLs from structured extraction).
+- `app/services/artifacts/evidence.py` builds a **SOURCE INDEX** for the analyst prompt.
+- The final report must use inline citations `[^1]`, `[^2]`, … and a **## References** section.
+- Upstream failures are listed in the prompt so the model does not invent numbers to replace missing quant/research output.
 
-Pattern:
+### Memory & persistence
 
-Agent A → generates output
-Agent B → critiques output
-Agent A → improves result
+- Short-term: graph state, messages, artifacts (reducers).
+- Long-term: **Postgres checkpointer** — resume runs, crash recovery, per-`thread_id` isolation.
 
+### MCP & API
 
-### Analyst
-The Analyst produces a "Candidate Report". The analyst doesn't search; it "thinks" over the gathered data.
+- **MCPManager** — persistent sessions, cached tools, `asyncio.Lock` on startup (avoids `ClosedResourceError`).
+- **FastAPI** — graph execution, SSE streaming, lifespan hooks for MCP + checkpointer.
 
-- Strategy: Use a "Chain of Thought" prompt to ensure it doesn't skip steps when transforming raw data into investment insights.
-- Role: Acts as the data scientist's assistant, looking for underlying trends and risks.
+---
 
-The final report in markdown provides insight into the investment the user is asking for.
+## Offline evaluation
 
+Benchmark-driven pytest suite under `evals/`. Cases live in `evals/datasets/benchmark.jsonl` (one JSON object per line).
 
-### Memory Component
-Stores intermediate results and long‑term information.
+### What each run checks
 
-- short‑term conversation memory
-- vector database (not implemented here)
-- Stores graph checkpoints.
-    - Backend:
-        - Postgres
-    - Allows:
-        - resume runs: LangGraph automatically restores the last checkpoint.
-            - Run crashes during Analyst agent.
-            - Next invocation resumes from Analyst node.
-        - crash recovery
-        - long‑running tasks
-    - This automatically stores:
-        - node state
-        - graph transitions
-        - outputs
-        - thread memory
+| Layer | Evaluator | Description |
+|-------|-----------|-------------|
+| **Deterministic** | `deterministic:*` | Query validity, DAG structure, plan agents, regex / length on report |
+| **Workflow** | `required_agents` | Expected nodes in execution path (`auditor` → `quant_analyst` in trace) |
+| **Infra** | `resilience` | Graph completed, no runaway steps (≤50), ≥1 MCP tool call |
+| **Budget** | `budgets` | Graph-only cost, tokens, latency vs category/global rails |
+| **Quality** | `llm_judge` | **Single** LLM call scoring four pillars (0–1): faithfulness, citation fidelity, consistency, completeness |
 
+No per-case judge prompts — criteria are fixed in `evals/evaluators/llm_judge.py`. Cases only set `min_score` thresholds.
 
-### Reliability Improvements
-To make system reliable, it must address:
-
-#### Semantic Guardrails
-Use Pydantic schemas to enforce strict agent communication.
-
-If an agent sends malformed data:
-
-- Graph triggers retry logic.
-
-#### Token Budget Monitor
-- Prevents infinite reasoning loops.
-- Tracks cumulative token cost.
-- System self‑terminates if limits exceeded.
-
-#### Traceability
-- Observability tools allow debugging of reasoning decisions.
-
-- **LangSmith** traces show agent thought chains.
-
-
-## Other Considerations
-### Notebooks
-Notebooks are used to communicate with the graph - of course its not ideal because of
-
-- SSE streams stall
-- event loop blocking
-- poor concurrency
+### Case format (example)
 
 ```json
-Notebook → HTTP request → LangGraph API (FastAPI container) → MCP server → external APIs
+{
+  "id": "simple-001",
+  "category": "simple_task",
+  "input_query": "Summarize NVIDIA's latest quarterly revenue and key growth drivers.",
+  "run_full_graph": true,
+  "required_agents": ["research", "analyst"],
+  "checks": {
+    "deterministic": [
+      { "type": "query_valid", "expected": true },
+      { "type": "dag_valid", "expected": true },
+      { "type": "plan_has_agent", "agent": "research" },
+      { "type": "regex", "target": "final_report", "pattern": "(?i)revenue" }
+    ],
+    "llm": [
+      { "metric": "faithfulness", "min_score": 0.7 },
+      { "metric": "citation_fidelity", "min_score": 0.6 },
+      { "metric": "consistency", "min_score": 0.7 },
+      { "metric": "completeness", "min_score": 0.7 }
+    ]
+  }
+}
 ```
 
+Omit `checks.llm` to use **category defaults**. Omit `budgets` to use **global + category budget rails** (see `evals/evaluators/defaults.py`).
 
-### MCP Session Management
+**Unit-only cases** (`run_full_graph: false`) — adversarial, ambiguous, synthetic DAG — run deterministic checks without live graph/MCP.
 
-Problem:
-- Closing MCP sessions per request causes
-`ClosedResourceError`.
-
-Solution:
-- Use persistent session tied to application lifetime.
-
-MCPManager
-- Responsibilities:
-    - maintain single async MCP session
-    - cache tools
-    - manage connection lifecycle
-    - Concurrency Protection
-        - Use `asyncio.Lock` during initialization.
-        - Prevents race conditions when multiple requests load tools.
-
-- MCP startup should be integrated into FastAPI lifespan. This guarantees:
-    - MCP session ready before requests
-    - checkpointer initialized
-
-
-### FastAPI Runtime Layer
-Responsibilities:
-
-- initialize services
-- expose API endpoints
-- run graphs
-- SSE Streaming 
-    - Persistent runs using checkpointer
-
-
-Responsibilities:
-- streaming responses using SSE
-- trigger async graph execution
-- pass thread_id
-- production deployment path
-
-It separates orchestration from experimentation.
-
-### Why MCP
-MCP standardizes tool discovery and execution.
-
-Benefits:
-
-- decouples agents from tool implementations
-- enables external tool services
-- future compatibility with agent ecosystems
-
-### Why Postgres Checkpointing
-Postgres provides:
-- reliability
-- persistence
-- ability to resume workflows
-
-This is essential for long-running agent pipelines.
-
-#### Parallel Execution
-LangGraph supports parallel users via thread_id.
-
-Example:
-
-- User A → thread_id = nvidia
-- User B → thread_id = tesla
-
-Each run isolated.
-
-
-
-## Project Limitations (Honest Critique)
-
-- Limited Evaluation Framework
-The project lacks automated evaluation metrics.
-    - Future improvement:
-        - integrate evaluation datasets
-        - automatic grading of agent outputs
-
-- Limited Observability
-Current tracing is minimal.
-    - Future improvement:
-        - integrate LangSmith
-        - visualize agent execution traces
-
-- No Cost Monitoring
-LLM token usage not tracked.
-    - Future improvement:
-        - token budget monitoring
-        - cost dashboards
-
-- No Automatic Retry Policies
-Currently failures require manual inspection.
-    - Future improvement:
-        - structured retry strategies
-        - fallback models
-
-
-- No replayable runs
-    - run IDs for debugging
-    - agent execution timeline
-
-
-### run it
-
-## Run
+### Prerequisites
 
 ```bash
-# Start API
-uvicorn app.main:app --reload
+pip install -r requirements.txt
 
+# Integration evals need MCP containers
+docker compose up -d mcp-research mcp-quant
 ```
 
+### Commands
 
+```bash
+# Fast — deterministic + DAG cases (~seconds)
+pytest evals/ -m unit -v
 
+# Integration — full graph + judge (needs API keys + MCP)
+EVAL_MODE=1 pytest evals/ -m integration -v --run-integration
+
+# One case
+EVAL_MODE=1 pytest evals/ -m integration -v --run-integration --eval-case-id simple-001
+
+# Several cases (recommended over full suite — avoids rate limits)
+EVAL_MODE=1 pytest evals/ -m integration -v --run-integration \
+  --eval-case-id simple-001 \
+  --eval-case-id multi-001 \
+  --eval-case-id missing-001 \
+  --eval-case-id hall-001
+
+# All graph cases (heavy — use delay)
+EVAL_CASE_DELAY_SECONDS=15 \
+  EVAL_MODE=1 pytest evals/ -m integration -v --run-integration --run-full-suite
+```
+
+Reports: `evals/reports/latest.txt` and `latest.json` (full `EvaluatorResult` list per case).
+
+### Where to read evaluator results
+
+| Location | Contents |
+|----------|----------|
+| `evals/reports/latest.json` | Full run: `evaluators[]` with `name`, `passed`, `score`, `explanation`, `details` |
+| `evals/reports/latest.txt` | Aggregated success rate, faithfulness, budget failures |
+| **Langfuse** (if keys set) | Per-case trace `offline_eval:<case_id>` with scores: `eval_case_passed`, `deterministic_*`, `llm_faithfulness`, etc. |
+| Langfuse → **Datasets** | `investment_research_benchmark` — items synced from benchmark cases, linked via run name |
+
+After each integration case, `evals/langfuse_export.py`:
+
+1. Upserts a **dataset item** in `investment_research_benchmark` (case id, query, category).
+2. Links the graph **trace** to a dataset **run** (`LANGFUSE_EVAL_RUN_NAME`, e.g. `offline_eval_local`).
+3. Writes **scores** on the trace for every evaluator, plus per-metric LLM scores (`llm_faithfulness`, …).
+4. Sets trace **output** to the full `evaluators[]` JSON (same shape as `latest.json`).
+
+Configure in `.env`:
+
+```bash
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_EVAL_DATASET=investment_research_benchmark
+LANGFUSE_EVAL_RUN_NAME=offline_eval_local
+```
+
+Langfuse is useful here specially for regression: compare faithfulness and cost across runs in one UI, filter by tag `offline_eval`, and tie traces back to benchmark case IDs.
+
+### Eval code layout
+
+| Path | Role |
+|------|------|
+| `evals/evaluators/evaluate.py` | Runs all checks for one case |
+| `evals/evaluators/deterministic.py` | `query_valid`, `dag_valid`, `regex`, … |
+| `evals/evaluators/llm_judge.py` | Single-pass four-pillar judge |
+| `evals/evaluators/budgets.py` / `resilience.py` | Infra rails (auto-applied on `run_full_graph`) |
+| `evals/evaluators/defaults.py` | Global budget + default resilience + LLM thresholds |
+| `evals/langfuse_export.py` | Push `EvaluatorResult` → Langfuse scores + dataset |
+| `evals/test_cases/runner.py` | Executes graph, collects `EvalRunResult` |
+
+### Recommended smoke matrix
+
+| Case | Covers |
+|------|--------|
+| `simple-001` | Research + analyst, revenue regex, full LLM pillars |
+| `multi-001` | Quant + auditor path, multi-agent plan |
+| `missing-001` | Sparse / private-company data, higher faithfulness bar |
+| `hall-001` | Hallucination-prone query, faithfulness ≥ 0.8 |
+
+Default integration run executes **3** cases (`EVAL_MAX_INTEGRATION_CASES=3`). Override with `--run-full-suite` or `--max-integration-cases`.
+
+### Rate limits
+
+Integration runs use **5s delay** between cases (`EVAL_CASE_DELAY_SECONDS`), **retry with backoff** on 429s (`evals/test_cases/rate_limit.py`), and optional caps. Prefer batched `--eval-case-id` over full suite during development.
+
+### CI
+
+- **PRs:** `pytest evals/ -m unit` only  
+- **main / nightly:** integration evals with Docker MCP + secrets (`.github/workflows/offline_eval.yml`)
+
+### Observability (evals)
+
+With Langfuse keys set, each integration case produces trace `offline_eval:<case_id>` (graph spans) plus eval scores and dataset linkage (see table above). Set `LANGFUSE_EVAL_RUN_NAME` to group runs in the UI (e.g. `offline_eval_local`).
+
+---
+
+## Run the application
+
+The stack runs as **Docker Compose** services: FastAPI (`langgraph-api`), Postgres, Redis, and both MCP servers. FastAPI is not meant to run standalone — it depends on MCP sessions and the checkpointer at startup.
+
+```bash
+# From repo root
+docker network inspect agent-net >/dev/null 2>&1 || docker network create agent-net
+docker compose up -d
+```
+
+Services: `langgraph-api`, `postgres`, `redis`, `mcp-research`, `mcp-quant`. Open `notebooks/graph.ipynb` from the devcontainer (or any host on `agent-net`) to drive the API.
+
+**HTTP API** (inside the compose network):
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Liveness — `{"status": "ok"}` |
+| `POST /graph-stream` | Run graph via SSE (`update` per node, then `done` or `error`) |
+
+Notebook default: `GRAPH_API_URL=http://langgraph-api:8000` (override only if you rename the service or proxy the API).
+
+```bash
+docker compose logs -f langgraph-api   # confirm MCP + checkpointer startup
+```
+
+---
+
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `lg/app/` | LangGraph engine, agents, orchestration, observability |
+| `lg/app/services/artifacts/evidence.py` | Evidence bundles for analyst + eval judge (excludes `final_report`) |
+| `mcp_servers/` | Research search + quant sandbox MCP servers |
+| `evals/` | Benchmark dataset, evaluators, pytest entrypoint, reports, Langfuse export |
+| `shared-artifacts/` | Run outputs (reports, plots) when `ARTIFACT_DIR` is set |
+
+---
+
+## Honest limitations
+
+| Area | Status |
+|------|--------|
+| Offline eval | Benchmark + deterministic + single-pass LLM judge + budgets/resilience + Langfuse export |
+| Observability | Langfuse traces + scores for integration evals; LangSmith optional via env |
+| Citations | Analyst prompted for `[^n]` + References; citation_fidelity judged post-hoc (not enforced in-graph) |
+| Cost rails | Enforced in **evals** per run; not yet a hard stop inside the live graph |
+| Fault injection | Resilience checks natural failures; `mode: "injected"` MCP faults not yet in harness |
+| Vector DB agent | Schema present; not wired in main graph |
+| HITL | Query validation interrupt in app mode; skipped when `EVAL_MODE=1` |
+
+---
+
+## Reliability patterns (in-graph)
+
+- **Pydantic** artifacts and task updates  
+- **Plan validator** before scheduling  
+- **Scheduler** — skip failed dependents; partial analyst path when research/quant partially succeeds  
+- **Auditor** evaluator–optimizer loop on quant output  
+- **Bounded retries** — `retry_count` on `MasterState`; quant node increments on failure; `route_quant` / `route_audit` respect `MAX_ITERATION`  
+- **Eval safety net** — `EVAL_GRAPH_RECURSION_LIMIT` (default 50) in `evals/test_cases/runner.py`  
+- **Evidence bundle** — shared formatter for analyst, LLM judge, and faithfulness (upstream artifacts only, no `final_report` in corpus)  
