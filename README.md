@@ -228,13 +228,48 @@ Services: `langgraph-api`, `postgres`, `redis`, `mcp-research`, `mcp-quant`. Ope
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health` | Liveness — `{"status": "ok"}` |
-| `POST /graph-stream` | Run graph via SSE (`update` per node, then `done` or `error`) |
+| `POST /graph-stream` | Start a run (requires `thread.configurable.thread_id`) |
+| `POST /graph-resume` | Resume after HITL interrupt with clarified query |
+| `POST /feedback` | Record thumbs up/down for online monitoring |
 
-Notebook default: `GRAPH_API_URL=http://langgraph-api:8000` (override only if you rename the service or proxy the API).
+**SSE events:** `update` (per node) → `interrupt` (needs clarification) **or** `done` **or** `error`.
+
+Notebook default: `GRAPH_API_URL=http://langgraph-api:8000`.
 
 ```bash
 docker compose logs -f langgraph-api   # confirm MCP + checkpointer startup
 ```
+
+### Human-in-the-loop (query clarification)
+
+HITL is **only** at the query validator — when a query is vague but fixable, not for jailbreaks or unsafe requests.
+
+| Mode | Behavior |
+|------|----------|
+| **App / notebook** (`EVAL_MODE` unset) | Validator calls LangGraph `interrupt()` → API emits SSE `interrupt` → notebook prompts for clarification → `POST /graph-resume` with same `thread_id` |
+| **Offline eval** (`EVAL_MODE=1`) | No interrupt; invalid query returns `is_query_valid=false` and graph ends (automated benchmark) |
+| **Hard reject** | Injection / harmful queries skip HITL and end immediately |
+
+**Notebook flow** (`notebooks/graph.ipynb`):
+
+1. `POST /graph-stream` with a stable `thread_id` (Postgres checkpointer persists state).
+2. On `event: "interrupt"`, read the message and call `POST /graph-resume` with `{"resume": "clarified query", "thread": {...}}`.
+3. Repeat until `done`. Clarified text replaces the vague query in graph state before planning.
+
+Try: `USER_QUERY = "Analyze the chip company with strong AI demand."` then clarify e.g. `Research NVIDIA data center revenue trends`.
+
+### Online user feedback (lightweight)
+
+After a run, the notebook can call `POST /feedback`:
+
+```json
+{ "thread_id": "<uuid>", "rating": "up", "comment": "optional" }
+```
+
+- Appends to `shared-artifacts/feedback/feedback.jsonl`
+- If Langfuse keys are set, writes a `user_feedback` score (1.0 = up, 0.0 = down) on the trace/session
+
+This complements **offline eval** (benchmark + LLM judge before merge). Online feedback is for **production monitoring**, not a second in-request judge.
 
 ---
 
@@ -260,7 +295,8 @@ docker compose logs -f langgraph-api   # confirm MCP + checkpointer startup
 | Cost rails | Enforced in **evals** per run; not yet a hard stop inside the live graph |
 | Fault injection | Resilience checks natural failures; `mode: "injected"` MCP faults not yet in harness |
 | Vector DB agent | Schema present; not wired in main graph |
-| HITL | Query validation interrupt in app mode; skipped when `EVAL_MODE=1` |
+| HITL | Query clarification via `interrupt` + `/graph-resume`; hard-reject unsafe queries; disabled when `EVAL_MODE=1` |
+| Online feedback | `POST /feedback` → JSONL + optional Langfuse `user_feedback` score |
 
 ---
 
@@ -270,6 +306,6 @@ docker compose logs -f langgraph-api   # confirm MCP + checkpointer startup
 - **Plan validator** before scheduling  
 - **Scheduler** — skip failed dependents; partial analyst path when research/quant partially succeeds  
 - **Auditor** evaluator–optimizer loop on quant output  
-- **Bounded retries** — `retry_count` on `MasterState`; quant node increments on failure; `route_quant` / `route_audit` respect `MAX_ITERATION`  
+- **Bounded retries** — `retry_count` on `QuantInput`; quant subgraph loop increments on failure; respects `MAX_ITERATION`  
 - **Eval safety net** — `EVAL_GRAPH_RECURSION_LIMIT` (default 50) in `evals/test_cases/runner.py`  
 - **Evidence bundle** — shared formatter for analyst, LLM judge, and faithfulness (upstream artifacts only, no `final_report` in corpus)  

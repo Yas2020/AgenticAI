@@ -1,13 +1,43 @@
 import json
-from fastapi import FastAPI, Request
-from sse_starlette.sse import EventSourceResponse
-from langchain_core.messages import HumanMessage
-from app.schemas.api import GraphRequest
-from langchain_core.load import dumpd
-from app.core.engine import graph
-from app.services.mcp.mcp_clients import mcp_manager
+
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
+from langchain_core.messages import HumanMessage
+from langgraph.types import Command
+from sse_starlette.sse import EventSourceResponse
+
+from app.core.engine import graph
+from app.schemas.api import FeedbackRequest, GraphRequest, GraphResumeRequest
+from app.services.api.sse import stream_graph
 from app.services.langgraph_postgres.checkpointer import checkpointer, pool
+from app.services.mcp.mcp_clients import mcp_manager
+from app.services.observability.langfuse_tracer import is_langfuse_enabled
+from app.services.observability.user_feedback import record_user_feedback
+
+
+def _graph_config(req_thread) -> dict:
+    config = req_thread.model_dump() if req_thread else {}
+    configurable = config.setdefault("configurable", {})
+    thread_id = configurable.get("thread_id")
+
+    if is_langfuse_enabled() and thread_id:
+        try:
+            from langfuse.langchain import CallbackHandler
+
+            config["callbacks"] = [CallbackHandler()]
+            metadata = dict(config.get("metadata", {}))
+            metadata.update(
+                {
+                    "langfuse_session_id": thread_id,
+                    "langfuse_tags": ["app_run", "investment_research"],
+                }
+            )
+            config["metadata"] = metadata
+        except Exception:
+            pass
+
+    return config
 
 
 @asynccontextmanager
@@ -37,52 +67,38 @@ async def health():
 
 @app.post("/graph-stream")
 async def run_graph_stream(req: GraphRequest, request: Request):
+    if not req.thread or not req.thread.configurable.get("thread_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="thread.configurable.thread_id is required for HITL resume and checkpointing.",
+        )
+
     inputs = {
         "messages": [HumanMessage(content=m.content) for m in req.messages],
         "topic": req.topic,
     }
-    config = req.thread.model_dump() if req.thread else {}
+    config = _graph_config(req.thread)
 
-    async def event_generator():
-        try:
-            async for chunk in graph.astream(
-                inputs,
-                config=config,
-                stream_mode="updates",
-                version="v2",
-            ):
-                if await request.is_disconnected():
-                    break
+    return EventSourceResponse(stream_graph(graph, inputs, config, request))
 
-                for node_name, state_update in chunk["data"].items():
-                    if state_update is None:
-                        continue
 
-                    if (
-                        isinstance(state_update, dict)
-                        and "messages" in state_update
-                        and state_update["messages"]
-                    ):
-                        last_msg = state_update["messages"][-1]
-                        content = (
-                            last_msg.content
-                            if hasattr(last_msg, "content")
-                            else str(last_msg)
-                        )
-                    else:
-                        content = dumpd(state_update)
+@app.post("/graph-resume")
+async def resume_graph_stream(req: GraphResumeRequest, request: Request):
+    thread_id = req.thread.configurable.get("thread_id")
+    if not thread_id:
+        raise HTTPException(status_code=400, detail="thread.configurable.thread_id is required.")
 
-                    yield json.dumps(
-                        {
-                            "event": "update",
-                            "node": node_name,
-                            "content": content,
-                            "state": dumpd(state_update),
-                        }
-                    )
+    config = _graph_config(req.thread)
+    return EventSourceResponse(
+        stream_graph(graph, Command(resume=req.resume.strip()), config, request)
+    )
 
-            yield json.dumps({"event": "done"})
-        except Exception as e:
-            yield json.dumps({"event": "error", "message": str(e)})
 
-    return EventSourceResponse(event_generator())
+@app.post("/feedback")
+async def submit_feedback(req: FeedbackRequest):
+    return record_user_feedback(
+        thread_id=req.thread_id,
+        rating=req.rating,
+        comment=req.comment,
+        trace_id=req.trace_id,
+    )
