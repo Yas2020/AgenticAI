@@ -27,7 +27,7 @@ def build_graph(checkpointer=None):
     )
     builder.add_edge("planning_architect", "plan_validator")
     builder.add_conditional_edges(
-        "plan_validator", route_valid_plan, ["planning_architect", "scheduler"]
+        "plan_validator", route_valid_plan, ["planning_architect", "scheduler", END]
     )
     builder.add_conditional_edges(
         "scheduler", route_to_agents, ["research", "quant_analyst", "analyst", END]

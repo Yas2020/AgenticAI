@@ -303,9 +303,17 @@ This complements **offline eval** (benchmark + LLM judge before merge). Online f
 ## Reliability patterns (in-graph)
 
 - **Pydantic** artifacts and task updates  
-- **Plan validator** before scheduling  
+- **Plan validator** before scheduling — invalid DAG replans up to **3 attempts** (`plan_attempt_count`), then graph ends with a clear message  
+- **Planner / analyst** — LLM failures caught like research/quant; analyst returns `TaskUpdate(failed)` instead of crashing the run  
 - **Scheduler** — skip failed dependents; partial analyst path when research/quant partially succeeds  
 - **Auditor** evaluator–optimizer loop on quant output  
 - **Bounded retries** — `retry_count` on `QuantInput`; quant subgraph loop increments on failure; respects `MAX_ITERATION`  
 - **Eval safety net** — `EVAL_GRAPH_RECURSION_LIMIT` (default 50) in `evals/test_cases/runner.py`  
 - **Evidence bundle** — shared formatter for analyst, LLM judge, and faithfulness (upstream artifacts only, no `final_report` in corpus)  
+
+### V2 reliability (high value, not yet implemented)
+
+| Item | Why |
+|------|-----|
+| **Research tool resilience** | Single MCP tool round today; retry on empty search / transient tool errors would harden `simple-001` / `multi-001` paths |
+| **MCP reconnect on invoke** | Long-lived sessions fail hard on disconnect; reconnect-on-error avoids full API restart |

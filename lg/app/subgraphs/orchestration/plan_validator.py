@@ -1,10 +1,13 @@
 from collections import deque, defaultdict
-from langchain_core.messages import HumanMessage
+
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.graph import END
 
 from app.core.state import MasterState
 
-
 MAX_TASKS = 8
+MAX_PLAN_ATTEMPTS = 3
+
 
 def validate_dag(tasks):
     """
@@ -49,7 +52,7 @@ def missing_dep(tasks):
         for dep in task.depends_on:
             if dep not in task_ids:
                 return dep
-    
+
     return None
 
 
@@ -80,28 +83,43 @@ def collect_plan_errors(tasks) -> list[str]:
 #  --- Node ---
 
 def plan_validator(state: MasterState):
-    
+
     errors = collect_plan_errors(state["plan"])
-        
+
     if errors:
+        attempt = state.get("plan_attempt_count", 0) + 1
+        if attempt >= MAX_PLAN_ATTEMPTS:
+            error_msg = (
+                f"Could not produce a valid plan after {MAX_PLAN_ATTEMPTS} attempts.\n"
+                f"Last errors:\n" + "\n".join(errors)
+            )
+            return {
+                "messages": [AIMessage(content=error_msg)],
+                "plan": [],
+                "is_plan_valid": False,
+                "plan_attempt_count": attempt,
+            }
+
         error_msg = f"DAG is not valid:\n{'\n'.join(errors)}\n\n Please regenerate."
-        # CRITICAL: We return the error message AND clear the plan
         return {
             "messages": [HumanMessage(content=error_msg)],
-            "plan": [], # This triggers the Reducer to 'reset' the plan
-            "is_plan_valid": False 
+            "plan": [],
+            "is_plan_valid": False,
+            "plan_attempt_count": attempt,
         }
-    
-    # If valid, we set the flag to True
-    return {"is_plan_valid": True}  
-        
-  
-# ----- Condition ---
-  
+
+    return {"is_plan_valid": True, "plan_attempt_count": 0}
+
+
+# ----- Condition -----
+
 def route_valid_plan(state: MasterState):
-    """Route based on the explicit state flag for plan validation"""
-    
+    """Route based on the explicit state flag for plan validation."""
+
     if state["is_plan_valid"]:
         return "scheduler"
-    
+
+    if state.get("plan_attempt_count", 0) >= MAX_PLAN_ATTEMPTS:
+        return END
+
     return "planning_architect"

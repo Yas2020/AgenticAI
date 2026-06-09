@@ -71,6 +71,7 @@ class MasterState(MessagesState):
     
     is_plan_valid: bool = False
     is_query_valid: bool = False
+    plan_attempt_count: int = 0
     
     # Shared variables across subgraphs
     current_focus: Optional[str] = None

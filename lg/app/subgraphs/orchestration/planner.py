@@ -1,20 +1,24 @@
+import traceback
 from typing import List
-from pydantic import BaseModel, Field
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+
 from app.core.state import MasterState
 from app.schemas.task import Task
 
 ### LLM
 planner = ChatOpenAI(model="gpt-4o", temperature=0)
 
-    
+
 class ResearchDAG(BaseModel):
     """The output of the Architect node."""
+
     tasks: List[Task]
     strategy_rationale: str = Field(description="Why this sequence was chosen")
     estimated_tokens: int
-    
+
 
 # --- The Nodes ---
 # 2. 'vector_db': Internal proprietary research and historical reports. REMOVED
@@ -49,24 +53,34 @@ Return a valid DAG where 'depends_on' refers to a list of integer IDs.
 CONSTRAINT: Generate between 3 and 8 tasks.
 """
 
+
 async def planning_architect(state: MasterState):
     """
     Architect: Translates the user query into a Directed Acyclic Graph of tasks.
     """
-    # Use a high-reasoning model (Claude 3.5 Sonnet / DeepSeek-R1)
     user_query = state["messages"][-1].content
-    
-    # Use a high-reasoning model (Claude 3.5 Sonnet or GPT-4o)
-    structured_planner = planner.with_structured_output(ResearchDAG)
-    
-    dag_output = await structured_planner.ainvoke([
-        SystemMessage(content=PLANNING_SYSTEM_PROMPT),
-        HumanMessage(content=f"Generate a research DAG for: {user_query}")
-    ])
-    
-    # Update state: Store the tasks and the rationale
-    return {
-        "plan": dag_output.tasks, 
-        "current_focus": "Planning Complete",
-        "messages": [AIMessage(content=f"Plan generated: {dag_output.strategy_rationale}")]
-    }
+
+    try:
+        structured_planner = planner.with_structured_output(ResearchDAG)
+
+        dag_output = await structured_planner.ainvoke(
+            [
+                SystemMessage(content=PLANNING_SYSTEM_PROMPT),
+                HumanMessage(content=f"Generate a research DAG for: {user_query}"),
+            ]
+        )
+
+        return {
+            "plan": dag_output.tasks,
+            "current_focus": "Planning Complete",
+            "messages": [
+                AIMessage(content=f"Plan generated: {dag_output.strategy_rationale}")
+            ],
+        }
+    except Exception as e:
+        traceback.print_exc()
+        return {
+            "messages": [AIMessage(content=f"Planning failed: {e}")],
+            "plan": [],
+            "is_plan_valid": False,
+        }

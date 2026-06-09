@@ -19,7 +19,9 @@ MAX_ITERATION = 2
 
 
 class QuantInput(MasterState):
-    """Subgraph-local state for quant execution and audit reflection loops."""
+    """
+    Subgraph-local state for quant execution and audit reflection loops.
+    """
 
     task_id: int
     retry_count: int = 0
@@ -262,12 +264,15 @@ async def quant_node(state: QuantInput):
         ]}
  
 def route_quant(state: QuantInput):
+    """
+    Checks for deterministic conditions before routing to Auditor: Is artifacts from quant populated successfully? If not, route it back to Quant, otherwise to Auditor - including the case when max iteration reached already (auditor would fail the task without checking).
+    """
+
     last_artifact = state["artifacts"][-1]
     if not last_artifact.success:
         retry_count = state.get("retry_count", 0)
         if retry_count < MAX_ITERATION:
             return Send("quant_node", state)
-        return "auditor_node"
 
     return "auditor_node"
    
@@ -308,6 +313,9 @@ RESEARCH DATA FOUND:
 """
 
 async def auditor_node(state: QuantInput):
+    """
+    Checks results from Quant agent against the rubric
+    """
     # 1. If the task was marked "failed" by agent node, nothing left for auditor to check. 
     # It is the scheduler job to decide the next step
     task = next(t for t in state["plan"] if t.id == state["task_id"])

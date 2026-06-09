@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from datetime import datetime, timezone
 
 from langchain_core.messages import SystemMessage
@@ -22,35 +23,43 @@ model = ChatOpenAI(model="gpt-4o", temperature=0)
 
 
 async def analyst_agent(state: MasterState):
-    
-    # 2. Pull the quant task from the global state
-    task = next(t for t in state["plan"] if t.id == state["task_id"])
+    task = next((t for t in state["plan"] if t.id == state["task_id"]), None)
     if task is None:
-        return {"plan": [TaskUpdate(id=state["task_id"], status="failed", error_message="Task not found")]}
-    
-    # 3. Gather all context
-    research_docs = format_evidence_bundle(state["artifacts"], sources=("research",))
-    quant_results = format_evidence_bundle(state["artifacts"], sources=("quant_analyst",))
-    citation_index, _sources = build_source_citations(state["artifacts"])
+        return {
+            "plan": [
+                TaskUpdate(
+                    id=state["task_id"],
+                    status="failed",
+                    error_message="Task not found",
+                )
+            ]
+        }
 
-    failed_upstream = [
-        t
-        for t in state["plan"]
-        if t.status == "failed" and t.id != task.id
-    ]
-    failure_notes = ""
-    if failed_upstream:
-        lines = [
-            f"- Task {t.id} ({t.agent}): {t.error_message or 'failed'}"
-            for t in failed_upstream
-        ]
-        failure_notes = (
-            "### UPSTREAM TASK FAILURES (do not invent data to replace these):\n"
-            + "\n".join(lines)
-            + "\n"
+    try:
+        research_docs = format_evidence_bundle(state["artifacts"], sources=("research",))
+        quant_results = format_evidence_bundle(
+            state["artifacts"], sources=("quant_analyst",)
         )
+        citation_index, _sources = build_source_citations(state["artifacts"])
 
-    prompt = f"""
+        failed_upstream = [
+            t
+            for t in state["plan"]
+            if t.status == "failed" and t.id != task.id
+        ]
+        failure_notes = ""
+        if failed_upstream:
+            lines = [
+                f"- Task {t.id} ({t.agent}): {t.error_message or 'failed'}"
+                for t in failed_upstream
+            ]
+            failure_notes = (
+                "### UPSTREAM TASK FAILURES (do not invent data to replace these):\n"
+                + "\n".join(lines)
+                + "\n"
+            )
+
+        prompt = f"""
     You are a Senior Investment Analyst. Synthesize the evidence into a final investment report.
 
     ### SOURCE INDEX (cite every factual claim as [^1], [^2], etc. matching the numbers below):
@@ -74,40 +83,51 @@ async def analyst_agent(state: MasterState):
     - End with a "## References" section listing each [^n] URL or source label.
     - End with a section titled 'EVALUATION' grading preceding agents.
     """
-    
-    response = await model.ainvoke([SystemMessage(content=prompt)])
 
-    query = next(
-        (
-            getattr(msg, "content", "")
-            for msg in state.get("messages", [])
-            if getattr(msg, "content", None)
-        ),
-        "",
-    )
-    report_path = write_final_report(
-        response.content,
-        topic=state.get("topic", "equity research"),
-        query=query if isinstance(query, str) else str(query),
-        model_name=model.model_name,
-        artifacts=state.get("artifacts", []),
-    )
-    print(f"Final report written to {report_path}")
+        response = await model.ainvoke([SystemMessage(content=prompt)])
 
-    return {
-        "artifacts": [
-            Artifact(
-                artifact_type="final_report",
-                task_id=task.id,
-                source=task.agent,
-                content=response.content,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                success=True,
-                error=None,
-            )
-        ],
-        "plan": [TaskUpdate(id=task.id, status="completed", error_message=None)],
-    }
+        query = next(
+            (
+                getattr(msg, "content", "")
+                for msg in state.get("messages", [])
+                if getattr(msg, "content", None)
+            ),
+            "",
+        )
+        report_path = write_final_report(
+            response.content,
+            topic=state.get("topic", "equity research"),
+            query=query if isinstance(query, str) else str(query),
+            model_name=model.model_name,
+            artifacts=state.get("artifacts", []),
+        )
+        print(f"Final report written to {report_path}")
+
+        return {
+            "artifacts": [
+                Artifact(
+                    artifact_type="final_report",
+                    task_id=task.id,
+                    source=task.agent,
+                    content=response.content,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    success=True,
+                    error=None,
+                )
+            ],
+            "plan": [TaskUpdate(id=task.id, status="completed", error_message=None)],
+        }
+    except Exception as e:
+        traceback.print_exc()
+        return {
+            "plan": [
+                TaskUpdate(
+                    id=state["task_id"],
+                    status="failed",
+                    error_message=str(e),
+                )
+            ]
+        }
 
 
 
