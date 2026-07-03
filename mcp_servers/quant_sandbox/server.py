@@ -42,11 +42,10 @@ def contains_forbidden_imports(code: str):
 
 
 @mcp.tool()
-async def execute_quant_code(code: Annotated[str, Field(description="The Python code to execute for quantitative analysis. Must be valid Python code targeting the pandas, numpy, yfinance libraries.")]) -> str:
+async def execute_quant_code(code: Annotated[str, Field(description="The Python code to execute for quantitative analysis. Must be valid Python code targeting the pandas, numpy, scikit-learn, yfinance libraries.")]) -> str:
     """
     Executes Python-based quantitative analysis code. 
-    Use this tool whenever the user asks for financial calculations, backtesting, 
-    or statistical analysis that requires custom scripts.
+    Use this tool whenever the user asks for financial calculations, backtesting, or statistical analysis that requires custom scripts.
     """
     # 1. Protection (Keep your forbidden imports check)
     bad = contains_forbidden_imports(code)
